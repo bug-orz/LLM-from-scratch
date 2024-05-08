@@ -1,0 +1,3 @@
+PRETRAIN_DATA_PATH="./data"
+VOCAB_FILE="ice_text.model"
+VOCAB_SIZE=150344
