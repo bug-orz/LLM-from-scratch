@@ -25,6 +25,11 @@ class PretrainDataset(Dataset):
         cur_file=self.files[file_idx]
         with open(cur_file) as fp:
             text=json.load(fp)[idx-self.indexes[file_idx]]
+        #print('input_ids',self.tokenizer.encode(text["title"]))
+
+        return {'input_ids':self.tokenizer.encode(text["title"]),
+                "label":self.tokenizer.encode(text["content"]),
+                }
         return self.tokenizer.encode(text["title"]+"\n\n"+text["content"])
 
     def find_interval(self, target):
@@ -58,9 +63,8 @@ class PretrainDataset(Dataset):
     def test(self):
         print(self.__len__())
         print(self.indexes)
-        print(self.__getitem__(10000))
-        print(self.__getitem__(9999))
-        print(self.__getitem__(10001))
+        print(self.__getitem__(100))
+        print(self.__getitem__(9))
 
-dd=PretrainDataset()
-dd.test()
+#dd=PretrainDataset()
+#dd.test()

@@ -441,3 +441,5 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
             encoded_inputs[self.model_input_names[0]] = [self.pad_token_id] * difference + required_input
 
         return encoded_inputs
+  #  def eos_token_id(self):
+   #     return self._convert_token_to_id(self.eos_token)

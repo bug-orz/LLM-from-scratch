@@ -1,81 +1,130 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        return x + self.pe[:, :x.size(1), :]
 
 
-class DecoderOnlyTransformer(nn.Module):
-    def __init__(self, vocab_size, d_model, nhead, num_decoder_layers, dim_feedforward, max_seq_length, pos_dropout=0.1,
-                 trans_dropout=0.1):
-        super(DecoderOnlyTransformer, self).__init__()
-
+class MultiHeadAttention(nn.Module):
+    def __init__(self, d_model, num_heads):
+        super(MultiHeadAttention, self).__init__()
         self.d_model = d_model
-
-        # 位置编码层
-        self.positional_encoding = nn.Embedding(max_seq_length, d_model)
-
-        # Token嵌入层
-        self.token_embedding = nn.Embedding(vocab_size, d_model)
-
-        # Transformer解码器层
-        decoder_layer = nn.TransformerDecoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
-                                                   dropout=trans_dropout)
-        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_decoder_layers)
-
-        # 输出层
-        self.output_layer = nn.Linear(d_model, vocab_size)
-
-        # Dropout层
-        self.dropout = nn.Dropout(pos_dropout)
-
-    def forward(self, src, src_mask):
-        # 构建序列长度与batch size大小相同的位置编码
-        seq_length, batch_size = src.size()
-        position = torch.arange(seq_length, device=src.device).unsqueeze(1).repeat(1, batch_size)
-        pos_encoding = self.positional_encoding(position)
-
-        # 嵌入与位置编码相加
-        src = self.dropout(pos_encoding + self.token_embedding(src))
-
-        # 调整尺寸以符合Transformer预期的shape：S x B x E => B x S x E
-        src = src.permute(1, 0, 2)
-
-        # 解码器层
-        memory = None  # Decoder-only模型中不需要encoder的输出作为memory
-        output = self.transformer_decoder(src, memory, tgt_mask=src_mask)
-
-        # 将输出通过线性层以生成预测
-        output = self.output_layer(output)
-
-        return output
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
+        
+        self.query = nn.Linear(d_model, d_model)
+        self.key = nn.Linear(d_model, d_model)
+        self.value = nn.Linear(d_model, d_model)
+        self.out = nn.Linear(d_model, d_model)
+    
+    def forward(self, query, key, value, mask=None):
+        batch_size = query.size(0)
+        
+        # Linear projections
+        query = self.query(query).view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        key = self.key(key).view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        value = self.value(value).view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # Scaled dot-product attention
+        scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, -1e9)
+        attention = F.softmax(scores, dim=-1)
+        x = torch.matmul(attention, value)
+        
+        # Concatenation and linear transformation
+        x = x.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)
+        return self.out(x)
 
 
-def generate_square_subsequent_mask(sz):
-    mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
-    mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
-    return mask
+class FeedForward(nn.Module):
+    def __init__(self, d_model, d_ff):
+        super(FeedForward, self).__init__()
+        self.linear_1 = nn.Linear(d_model, d_ff)
+        self.linear_2 = nn.Linear(d_ff, d_model)
+    
+    def forward(self, x):
+        return self.linear_2(F.gelu(self.linear_1(x)))
 
 
-# 假设一些超参数和模型参数
-vocab_size = 1000
-d_model = 512
-nhead = 8
-num_decoder_layers = 6
-dim_feedforward = 2048
-max_seq_length = 100
-pos_dropout = 0.1
-trans_dropout = 0.1
+class DecoderLayer(nn.Module):
+    def __init__(self, d_model, num_heads, d_ff, dropout):
+        super(DecoderLayer, self).__init__()
+        self.attention = MultiHeadAttention(d_model, num_heads)
+        self.feed_forward = FeedForward(d_model, d_ff)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, x, mask=None):
+        # Multi-head attention with residual connection and layer normalization
+        attn_output = self.attention(x, x, x, mask)
+        x = x + self.dropout(attn_output)
+        x = self.norm1(x)
+        
+        # Feed forward with residual connection and layer normalization
+        ff_output = self.feed_forward(x)
+        x = x + self.dropout(ff_output)
+        x = self.norm2(x)
+        
+        return x
 
-# 初始化模型
-model = DecoderOnlyTransformer(vocab_size, d_model, nhead, num_decoder_layers, dim_feedforward, max_seq_length,
-                               pos_dropout, trans_dropout)
 
-# 假设一些输入
-src = torch.randint(0, vocab_size, (35, 20))  # (seq_length, batch_size)
+class GPT2(nn.Module):
+    def __init__(self, vocab_size, d_model, num_layers, num_heads, d_ff, max_len, dropout):
+        super(GPT2, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, d_model)
+        self.positional_encoding = PositionalEncoding(d_model, max_len)
+        self.layers = nn.ModuleList([DecoderLayer(d_model, num_heads, d_ff, dropout) for _ in range(num_layers)])
+        self.norm = nn.LayerNorm(d_model)
+        self.fc = nn.Linear(d_model, vocab_size)
+    
+    def forward(self, x, mask=None):
+        x = self.embedding(x)
+        x = self.positional_encoding(x)
+        
+        for layer in self.layers:
+            x = layer(x, mask)
+        
+        x = self.norm(x)
+        logits = self.fc(x)
+        return logits
 
-# 生成掩码
-src_mask = generate_square_subsequent_mask(35)
 
-# 前向传播
-output = model(src, src_mask)
 
-print(output.shape)  # 预期输出：(batch_size, seq_length, vocab_size)
+# 示例使用
+
+"""
+
+import config
+
+vocab_size = config.VOCAB_SIZE
+d_model = config.d_model
+num_layers = config.num_layers
+num_heads = config.num_heads
+d_ff = config.d_ff
+max_len = config.max_len
+dropout = config.dropout_rate
+
+
+
+model = GPT2(vocab_size, d_model, num_layers, num_heads, d_ff, max_len, dropout)
+input_ids = torch.randint(0, vocab_size, (2, 10)) # 批次为2，每句话长度为10
+print(input_ids.shape)
+outputs = model(input_ids)
+print(outputs[0][0])
+
+"""
